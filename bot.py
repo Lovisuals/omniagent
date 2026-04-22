@@ -15,14 +15,14 @@ def _env(k: str, required: bool = True, default: str = "") -> str:
         raise SystemExit(f"FATAL env {k} missing")
     return v
 
-TG_TOKEN     = _env("TG_TOKEN")
-OWNER_ID     = int(_env("OWNER_ID"))
-LLM_KEY      = _env("LLM_KEY")
-LLM_URL      = _env("LLM_URL", False, "https://api.groq.com/openai/v1/chat/completions")
-MODEL        = _env("MODEL", False, "openai/gpt-oss-120b")
-FALLBACK_MODEL = _env("FALLBACK_MODEL", False, "llama-3.3-70b-versatile")
-GITHUB_REPO  = _env("GITHUB_REPO", False)
-GITHUB_TOKEN = _env("GITHUB_TOKEN", False)
+TG_TOKEN       = _env("TG_TOKEN")
+OWNER_ID       = int(_env("OWNER_ID"))
+LLM_KEY        = _env("LLM_KEY")
+LLM_URL        = _env("LLM_URL", False, "https://api.groq.com/openai/v1/chat/completions")
+MODEL          = _env("MODEL",          False, "llama-3.3-70b-versatile")
+FALLBACK_MODEL = _env("FALLBACK_MODEL", False, "llama3-groq-70b-8192-tool-use-preview")
+GITHUB_REPO    = _env("GITHUB_REPO",  False)
+GITHUB_TOKEN   = _env("GITHUB_TOKEN", False)
 
 SELF       = Path(__file__).resolve()
 BACKUP_DIR = SELF.parent / ".backups"
@@ -65,8 +65,18 @@ def read_self() -> str:
 def write_self(new_code: str) -> str:
     if not isinstance(new_code, str) or not new_code.strip():
         return "REJECTED: empty code"
-    if "# ... existing" in new_code or "# ... rest of" in new_code or new_code.count("\n") < 20:
-        return "REJECTED: looks like a diff or stub. Provide the COMPLETE file (no ellipses, no placeholders). Call read_self first and return the entire modified source."
+    # Detect diff/stub patterns — no line-count heuristic (too aggressive for small bots)
+    DIFF_MARKERS = [
+        "# ... existing", "# ... rest of", "# ...existing", "# ...rest of",
+        "# existing code", "...existing...", "# <rest of file>",
+    ]
+    for marker in DIFF_MARKERS:
+        if marker in new_code:
+            return (
+                "REJECTED: looks like a diff or stub — detected placeholder "
+                f"'{marker}'. Provide the COMPLETE file (no ellipses, no placeholders). "
+                "Call read_self first and return the entire modified source."
+            )
     if len(new_code.encode("utf-8")) > MAX_SRC:
         return f"REJECTED: exceeds {MAX_SRC} bytes"
     try:
@@ -185,24 +195,37 @@ Two roles:
 2 SELF-DEVELOPER — when asked to improve the bot:
    - First call read_self to get current source.
    - Then call write_self with the COMPLETE rewritten file.
-   - CRITICAL: write_self requires the ENTIRE file contents. Never use '# ... existing code', '...', or placeholders. Copy every line from read_self output and modify only what's needed.
+   - CRITICAL: write_self requires the ENTIRE file contents. Never use '# ... existing code', '...', or any placeholder. Copy every line from read_self output and modify only what's needed.
    - After success say 'Done — send /reload to activate.'
    - Never remove the OWNER_ID guard or the boot-test in write_self.
 
-Tool-call format: you MUST use the native tool_calls JSON structure. Do NOT emit '<function=...>' text — that is not valid."""
+Tool-call format: you MUST use the native tool_calls JSON structure. Do NOT emit '<function=name>{...}' as plain text — that format is rejected. Use structured tool_calls only."""
 
-_FUNC_TEXT_RE = re.compile(r"<function=(\w+)>(\{.*?\})(?:</function>)?", re.DOTALL)
+# Regex for salvaging text-wrapped tool calls emitted by misbehaving models.
+# Named groups make extraction explicit and safe.
+_FUNC_TEXT_RE = re.compile(
+    r"<function=(?P<name>\w+)>(?P<args>\{.*?\})(?:</function>)?",
+    re.DOTALL,
+)
 
 def _salvage_text_tool_calls(content: str) -> list[dict]:
+    """
+    Convert <function=name>{...}</function> text blobs into proper tool_calls
+    dicts. IDs use a simple counter so assistant-message IDs and tool-result
+    tool_call_ids always match exactly (no timestamp drift between the two).
+    """
     out = []
     for i, m in enumerate(_FUNC_TEXT_RE.finditer(content or "")):
-        name, raw = m.group(1), m.group(2)
+        name = m.group("name")
+        raw  = m.group("args")
         try:
-            json.loads(raw)
+            json.loads(raw)   # validate JSON before accepting
         except json.JSONDecodeError:
+            log.warning("salvage: invalid JSON for tool %s — skipped", name)
             continue
+        call_id = f"salvaged_{i}"   # stable, counter-only; matches tool result below
         out.append({
-            "id": f"salvaged_{i}_{int(time.time())}",
+            "id": call_id,
             "type": "function",
             "function": {"name": name, "arguments": raw},
         })
@@ -213,7 +236,13 @@ def _llm_call(messages: list, tool_defs: list, model: str) -> tuple[int, dict | 
         r = requests.post(
             LLM_URL,
             headers={"Authorization": f"Bearer {LLM_KEY}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "tools": tool_defs, "tool_choice": "auto", "temperature": 0.2},
+            json={
+                "model": model,
+                "messages": messages,
+                "tools": tool_defs,
+                "tool_choice": "auto",
+                "temperature": 0.2,
+            },
             timeout=HTTP_T,
         )
         if r.status_code == 200:
@@ -233,34 +262,62 @@ def llm_agent(user_msg: str) -> str:
         for n, m in TOOLS.items()
     ]
     current_model = MODEL
+    fallback_used = False   # Fix: ensure the 400-retry path fires at most once
+
     for loop_i in range(MAX_LOOPS):
         status, data = _llm_call(messages, tool_defs, current_model)
+
         if status == 0:
             return f"⚠️ network: {data}"
-        if status == 400 and "tool_use_failed" in str(data) and current_model != FALLBACK_MODEL:
-            log.warning("tool_use_failed on %s — switching to %s", current_model, FALLBACK_MODEL)
+
+        # --- HTTP 400 / tool_use_failed recovery (single attempt only) ---
+        if status == 400 and not fallback_used and "tool_use_failed" in str(data):
+            log.warning(
+                "tool_use_failed on %s (loop %d) — switching to fallback %s",
+                current_model, loop_i, FALLBACK_MODEL,
+            )
             current_model = FALLBACK_MODEL
-            messages.append({"role": "user", "content": "Your previous attempt failed tool-call parsing. Use the native tool_calls JSON format, not <function=...> text. For write_self, include the COMPLETE file — no ellipses."})
+            fallback_used = True
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Your previous tool call failed format validation. "
+                    "Rules: (1) use native tool_calls JSON — never <function=...> text; "
+                    "(2) for write_self provide the COMPLETE file, no ellipses or placeholders."
+                ),
+            })
             continue
+
         if status != 200:
             log.error("E_LLM_HTTP %s %s", status, data)
             return f"⚠️ LLM HTTP {status}: {str(data)[:300]}"
+
         try:
             msg = data["choices"][0]["message"]
         except Exception as e:
             log.error("E_LLM_FMT %s", e)
             return "⚠️ malformed response"
+
         content = msg.get("content") or ""
-        calls = msg.get("tool_calls") or []
+        calls   = msg.get("tool_calls") or []
+
+        # --- Salvage text-wrapped tool calls ---
         if not calls and "<function=" in content:
             salvaged = _salvage_text_tool_calls(content)
             if salvaged:
-                log.warning("salvaged %d text-wrapped tool calls", len(salvaged))
-                calls = salvaged
+                log.warning("salvaged %d text-wrapped tool call(s) loop=%d", len(salvaged), loop_i)
+                calls   = salvaged
                 content = ""
-        messages.append({"role": "assistant", "content": content, "tool_calls": calls or None})
+
+        messages.append({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": calls or None,
+        })
+
         if not calls:
             return content or "(empty)"
+
         for c in calls:
             fname = c["function"]["name"]
             try:
@@ -268,14 +325,20 @@ def llm_agent(user_msg: str) -> str:
             except json.JSONDecodeError:
                 args = {}
             if fname not in TOOLS:
-                out = f"ERROR: unknown tool {fname}"
+                result = f"ERROR: unknown tool {fname}"
             else:
                 try:
-                    out = TOOLS[fname]["fn"](**args)
+                    result = TOOLS[fname]["fn"](**args)
                 except Exception as e:
                     log.exception("E_TOOL %s", fname)
-                    out = f"ERROR[E_TOOL]: {type(e).__name__}: {e}"
-            messages.append({"role": "tool", "tool_call_id": c["id"], "name": fname, "content": str(out)[:MAX_OUT]})
+                    result = f"ERROR[E_TOOL]: {type(e).__name__}: {e}"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": c["id"],   # matches salvaged_N or real ID
+                "name": fname,
+                "content": str(result)[:MAX_OUT],
+            })
+
     return "⚠️ tool-loop limit"
 
 def is_owner(u: Update) -> bool:
@@ -359,7 +422,9 @@ async def cmd_tools(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_model(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(u): return
-    await u.message.reply_text(f"primary: {MODEL}\nfallback: {FALLBACK_MODEL}\n(change via MODEL env var)")
+    await u.message.reply_text(
+        f"primary:  {MODEL}\nfallback: {FALLBACK_MODEL}\n(override via MODEL / FALLBACK_MODEL env vars)"
+    )
 
 async def on_error(u: object, c: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("E_TG %s", c.error, exc_info=c.error)
@@ -369,7 +434,7 @@ def main() -> None:
         print("boot-test ok")
         sys.exit(0)
     priv = audit_repo_privacy()
-    log.info("privacy=%s tools=%d model=%s", priv, len(TOOLS), MODEL)
+    log.info("privacy=%s tools=%d model=%s fallback=%s", priv, len(TOOLS), MODEL, FALLBACK_MODEL)
     if priv == "public":
         log.warning("REPO IS PUBLIC — rotate any hardcoded secrets")
     app = ApplicationBuilder().token(TG_TOKEN).build()
