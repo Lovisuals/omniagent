@@ -19,13 +19,12 @@ GITHUB_TOKEN   = _env("GITHUB_TOKEN",  False)
 ALLOWED_USERS: set[int] = set()
 _raw = os.environ.get("ALLOWED_USERS", "")
 if _raw:
-    for u in _raw.split(","):
+    for _u in _raw.split(","):
         try:
-            ALLOWED_USERS.add(int(u.strip()))
+            ALLOWED_USERS.add(int(_u.strip()))
         except ValueError:
             pass
 
-# Paths (relative to project root)
 ROOT       = Path(__file__).resolve().parent
 SELF       = ROOT / "bot.py"
 BACKUP_DIR = ROOT / ".backups"
@@ -34,7 +33,6 @@ BRAIN_FILE = ROOT / "brain.json"
 
 BACKUP_DIR.mkdir(exist_ok=True)
 
-# Constants
 MAX_LOOPS         = 12
 MAX_OUT           = 8000
 MAX_CHUNK         = 3500
