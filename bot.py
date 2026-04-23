@@ -1,5 +1,4 @@
 import os, sys, shutil, logging, time
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters,
@@ -273,16 +272,20 @@ async def cmd_reflection_log(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_error(u: object, c: ContextTypes.DEFAULT_TYPE) -> None:
+    err_str = str(c.error)
+    if "Conflict: terminated by other getUpdates request" in err_str:
+        log.warning("Polling conflict — normal during Railway deploy")
+        return
     log.error("E_TG %s", c.error, exc_info=c.error)
 
 
 def main() -> None:
     if os.environ.get("OMNI_BOOT_TEST") == "1":
         brain.load()
-        assert callable(llm_agent),    "llm_agent missing"
-        assert callable(brain.learn),  "brain.learn missing"
-        assert callable(brain.flush),  "brain.flush missing"
-        assert OWNER_ID,               "OWNER_ID missing"
+        assert callable(llm_agent)
+        assert callable(brain.learn)
+        assert callable(brain.flush)
+        assert OWNER_ID
         print("boot-test ok")
         sys.exit(0)
 
@@ -296,7 +299,11 @@ def main() -> None:
 
     brain.load()
 
+    # Small delay helps prevent polling conflict on Railway deployments
+    time.sleep(4)
+
     app = ApplicationBuilder().token(TG_TOKEN).build()
+
     for name, fn in [
         ("start",       cmd_start),
         ("ask",         cmd_ask),
@@ -315,10 +322,16 @@ def main() -> None:
         ("reflections", cmd_reflection_log),
     ]:
         app.add_handler(CommandHandler(name, fn))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+
     log.info("OmniAgent v3 — up. model=%s owner=%s", MODEL, OWNER_ID)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,   # Critical for Railway
+    )
 
 
 if __name__ == "__main__":
