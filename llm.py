@@ -1,4 +1,6 @@
-import json, time, logging, re
+import json, time, logging, re, inspect
+from typing import Any, Callable, get_type_hints
+
 import requests
 
 import brain
@@ -20,7 +22,7 @@ def _py_to_json(t: Any) -> dict:
 
 
 def tool(desc: str):
-    def deco(fn):
+    def deco(fn: Callable) -> Callable:
         hints = get_type_hints(fn)
         sig = inspect.signature(fn)
         props, required = {}, []
@@ -162,7 +164,7 @@ def llm_agent(user_msg: str, user_id: str = "") -> str:
                 fallback_used = True
                 messages.append({"role": "user", "content": "Rate limit hit. Using fallback model."})
                 continue
-            return "⚠️ Groq rate limit reached. Trying again automatically..."
+            return "⚠️ Groq rate limit reached. Please try again in 15–30 seconds."
 
         if status == 400 and "model_decommissioned" in str(data).lower():
             log.error("Decommissioned model %s", current_model)
