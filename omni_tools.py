@@ -1,15 +1,12 @@
 import os, sys, subprocess, shutil, time, re
 from pathlib import Path
-
 import requests
-
 import brain
 from config import (
     SELF, BACKUP_DIR, EDGES_LOG, ROOT,
     SHELL_T, WEB_T, MAX_OUT, MAX_SRC,
 )
 from llm import tool
-
 
 def _shell_raw(cmd: str) -> str:
     try:
@@ -21,11 +18,9 @@ def _shell_raw(cmd: str) -> str:
     except Exception as e:
         return f"ERROR: {e}"
 
-
 @tool("Read the full current source of bot.py.")
 def read_self() -> str:
     return SELF.read_text(encoding="utf-8")
-
 
 @tool("Overwrite bot.py with COMPLETE new source. No diffs, no ellipses. Full file only. Syntax + boot-test gated.")
 def write_self(new_code: str) -> str:
@@ -63,7 +58,6 @@ def write_self(new_code: str) -> str:
     tmp.replace(SELF)
     return f"ok — backup={bk.name}. Tell user to /reload."
 
-
 @tool("Clone a GitHub repository into a subdirectory.")
 def clone_repo(repo_url: str, target_dir: str = "openclaw") -> str:
     if not repo_url.startswith(("https://github.com/", "git@github.com:")):
@@ -75,7 +69,6 @@ def clone_repo(repo_url: str, target_dir: str = "openclaw") -> str:
     if "fatal" in result.lower():
         return f"Clone failed: {result[:300]}"
     return f"Cloned {repo_url} into ./{target_dir}"
-
 
 @tool("Read content of any file or list directory contents.")
 def read_file(path: str) -> str:
@@ -89,7 +82,6 @@ def read_file(path: str) -> str:
         return full.read_text(encoding="utf-8")
     except Exception as e:
         return f"ERROR: {e}"
-
 
 @tool("Write content to any file inside the project root.")
 def write_file(path: str, content: str) -> str:
@@ -105,7 +97,6 @@ def write_file(path: str, content: str) -> str:
     except Exception as e:
         return f"ERROR writing {path}: {e}"
 
-
 @tool("List files and directories at given path.")
 def list_dir(path: str = ".") -> str:
     target = ROOT / path
@@ -117,13 +108,11 @@ def list_dir(path: str = ".") -> str:
     except Exception as e:
         return f"ERROR: {e}"
 
-
 @tool("Run a shell command with 30s timeout.")
 def shell(cmd: str) -> str:
     if not cmd.strip():
         return "ERROR: empty cmd"
     return _shell_raw(cmd)
-
 
 @tool("Commit all changes and push to origin.")
 def git_push(msg: str) -> str:
@@ -132,7 +121,6 @@ def git_push(msg: str) -> str:
     safe = msg.replace('"', "'")[:200]
     return _shell_raw(f'git add -A && git commit -m "{safe}" && git push')
 
-
 @tool("Append entry to EDGES_LOG.md.")
 def log_edge(description: str) -> str:
     if not description.strip():
@@ -140,7 +128,6 @@ def log_edge(description: str) -> str:
     with EDGES_LOG.open("a", encoding="utf-8") as f:
         f.write(f"- [{time.strftime('%Y-%m-%d %H:%M')}] {description.strip()}\n")
     return "logged"
-
 
 @tool("Search web via DuckDuckGo.")
 def web_search(query: str) -> str:
@@ -166,7 +153,6 @@ def web_search(query: str) -> str:
     except Exception as e:
         return f"ERROR[E_WEB]: {e}"
 
-
 @tool("Fetch URL and return cleaned text.")
 def fetch_url(url: str) -> str:
     if not url.startswith(("http://", "https://")):
@@ -181,11 +167,9 @@ def fetch_url(url: str) -> str:
     except Exception as e:
         return f"ERROR[E_FETCH]: {e}"
 
-
 @tool("Store fact in long-term memory.")
 def remember(key: str, value: str, confidence: float = 0.75, source: str = "user") -> str:
     return brain.learn(key, value, confidence, source=source)
-
 
 @tool("Retrieve relevant memories.")
 def recall_tool(topic: str) -> str:
@@ -194,16 +178,13 @@ def recall_tool(topic: str) -> str:
         return f"no memories for '{topic}'"
     return "\n".join(f"• {n['key']}: {n['value']} (conf={n['conf']:.2f}, src={n.get('source','?')})" for n in hits)
 
-
 @tool("Erase a memory by key.")
 def forget(key: str) -> str:
     return brain.forget(key)
 
-
 @tool("Show brain status.")
 def brain_info() -> str:
     return brain.status()
-
 
 @tool("Trigger self-reflection.")
 def reflect() -> str:

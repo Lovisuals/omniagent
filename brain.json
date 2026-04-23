@@ -1,1 +1,14 @@
-{}
+{
+  "version": 3,
+  "nodes": {},
+  "reflection_log": [],
+  "meta": {
+    "interact_count": 0,
+    "decay_cycle": 0,
+    "consolidation_count": 0,
+    "created": 1776950079.7005334,
+    "last_commit": 0.0,
+    "recent_interactions": [],
+    "recall_ids_this_turn": []
+  }
+}
